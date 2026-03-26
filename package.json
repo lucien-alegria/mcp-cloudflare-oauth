@@ -1,0 +1,23 @@
+{
+  "name": "mcp-cloudflare-oauth",
+  "version": "1.0.0",
+  "description": "OAuth 2.1 provider for MCP servers on Cloudflare Workers — wraps any API-key-based service into a per-user OAuth flow",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "files": ["src"],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/workers-types": "^4.20260317.1",
+    "agents": "^0.8.4"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "typescript": "^6.0.2"
+  },
+  "license": "MIT"
+}
