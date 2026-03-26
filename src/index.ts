@@ -511,8 +511,8 @@ export function createOAuthMcpWorker(opts: OAuthMcpOptions): {
         return handleToken(request, env.MCP_AUTH_KV);
       }
 
-      // MCP endpoint
-      if (pathname === "/mcp") {
+      // MCP endpoint (Claude web connector sends traffic to "/" instead of "/mcp")
+      if (pathname === "/mcp" || pathname === "/") {
         let token: string | undefined;
         const authHeader = request.headers.get("Authorization");
         if (authHeader?.startsWith("Bearer ")) {
@@ -523,7 +523,9 @@ export function createOAuthMcpWorker(opts: OAuthMcpOptions): {
 
         const server = opts.buildServer(token);
         // Cast needed: `agents` bundles its own @modelcontextprotocol/sdk types
-        const handler = createMcpHandler(server as any);
+        // Use route: "" to disable the agents handler's built-in path check —
+        // we already matched the pathname ourselves above.
+        const handler = createMcpHandler(server as any, { route: "" } as any);
         return handler(request, env, ctx);
       }
 
