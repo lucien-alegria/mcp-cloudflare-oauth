@@ -17,6 +17,7 @@ Reusable OAuth 2.1 provider for MCP servers deployed on Cloudflare Workers. Wrap
 - **`buildServer` accepts `any` return type** — works around duplicate `McpServer` type conflicts between the consumer's `@modelcontextprotocol/sdk` and the copy bundled inside `agents`. Runtime types are identical; only TS declarations conflict.
 - **`@modelcontextprotocol/sdk` is a peer dep** — prevents duplicate installs and the type conflicts above.
 - **Per-request server instantiation** — `buildServer` is called on every `/mcp` request. Workers are stateless; reusing a single `McpServer` causes "already connected" errors.
+- **401 required for unauthenticated `/mcp` requests** — the server must return `401 Unauthorized` with a `WWW-Authenticate: Bearer realm="...", resource_metadata="..."` header when no valid token is present. Without this, Claude.ai receives 200 and never triggers the OAuth flow — users silently skip the token prompt. This was a real bug found in production.
 - **PKCE (S256) required** — verified on token exchange per the MCP spec.
 - **Token TTLs**: access tokens 30 days, refresh tokens 1 year, auth codes 5 minutes, client registrations 1 year.
 - **i18n**: authorize page supports `"en"` and `"fr"`.
