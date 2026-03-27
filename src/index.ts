@@ -521,6 +521,17 @@ export function createOAuthMcpWorker(opts: OAuthMcpOptions): {
           token = resolved ?? undefined;
         }
 
+        // No valid token — tell Claude.ai to start the OAuth flow
+        if (!token) {
+          return new Response(null, {
+            status: 401,
+            headers: {
+              "WWW-Authenticate": `Bearer realm="${opts.issuer}", resource_metadata="${opts.issuer}/.well-known/oauth-protected-resource"`,
+              ...corsHeaders(),
+            },
+          });
+        }
+
         const server = opts.buildServer(token);
         // Cast needed: `agents` bundles its own @modelcontextprotocol/sdk types
         // Use route: "" to disable the agents handler's built-in path check —
