@@ -46,7 +46,7 @@ export interface OAuthMcpOptions {
 
 export interface OAuthMcpEnv {
   MCP_AUTH_KV: KVNamespace;
-  TOKEN_ENCRYPTION_KEY?: string;
+  TOKEN_ENCRYPTION_KEY: string;
   [key: string]: unknown;
 }
 
@@ -129,7 +129,6 @@ async function decryptToken(
   stored: string,
   hexKey: string
 ): Promise<string> {
-  if (!stored.startsWith("v1:")) return stored; // legacy plain-text fallback
   const parts = stored.split(":");
   const ivHex = parts[1];
   const ctB64 = parts.slice(2).join(":"); // re-join in case base64 contains ":"
@@ -321,7 +320,7 @@ function handleAuthorize(request: Request, opts: OAuthMcpOptions): Response {
 async function handleAuthorizePost(
   request: Request,
   kv: KVNamespace,
-  encryptionKey?: string
+  encryptionKey: string
 ): Promise<Response> {
   const form = await request.formData();
   const apiToken = form.get("api_token") as string;
@@ -346,7 +345,7 @@ async function handleAuthorizePost(
 
   await kv.put(
     `code:${code}`,
-    encryptionKey ? await encryptToken(payload, encryptionKey) : payload,
+    await encryptToken(payload, encryptionKey),
     { expirationTtl: 300 }
   );
 
@@ -360,7 +359,7 @@ async function handleAuthorizePost(
 async function handleToken(
   request: Request,
   kv: KVNamespace,
-  encryptionKey?: string
+  encryptionKey: string
 ): Promise<Response> {
   const body = await request.text();
   const params = new URLSearchParams(body);
@@ -382,7 +381,7 @@ async function handleToken(
 async function handleTokenAuthCode(
   params: URLSearchParams,
   kv: KVNamespace,
-  encryptionKey?: string
+  encryptionKey: string
 ): Promise<Response> {
   const code = params.get("code");
   const codeVerifier = params.get("code_verifier");
@@ -401,11 +400,7 @@ async function handleTokenAuthCode(
     );
   }
 
-  const rawPayload = encryptionKey
-    ? await decryptToken(stored, encryptionKey)
-    : stored;
-
-  const codeData = JSON.parse(rawPayload) as {
+  const codeData = JSON.parse(await decryptToken(stored, encryptionKey)) as {
     apiToken: string;
     codeChallenge: string;
     codeChallengeMethod: string;
@@ -439,9 +434,7 @@ async function handleTokenAuthCode(
 
   const accessToken = randomToken(32);
   const refreshToken = randomToken(32);
-  const tokenToStore = encryptionKey
-    ? await encryptToken(codeData.apiToken, encryptionKey)
-    : codeData.apiToken;
+  const tokenToStore = await encryptToken(codeData.apiToken, encryptionKey);
 
   await kv.put(`access:${accessToken}`, tokenToStore, {
     expirationTtl: 60 * 60 * 24 * 30, // 30 days
@@ -466,7 +459,7 @@ async function handleTokenAuthCode(
 async function handleTokenRefresh(
   params: URLSearchParams,
   kv: KVNamespace,
-  encryptionKey?: string
+  encryptionKey: string
 ): Promise<Response> {
   const refreshToken = params.get("refresh_token");
   if (!refreshToken) {
@@ -485,16 +478,10 @@ async function handleTokenRefresh(
     );
   }
 
-  const apiToken = encryptionKey
-    ? await decryptToken(storedRefresh, encryptionKey)
-    : storedRefresh;
-
+  const apiToken = await decryptToken(storedRefresh, encryptionKey);
   const accessToken = randomToken(32);
-  const tokenToStore = encryptionKey
-    ? await encryptToken(apiToken, encryptionKey)
-    : apiToken;
 
-  await kv.put(`access:${accessToken}`, tokenToStore, {
+  await kv.put(`access:${accessToken}`, await encryptToken(apiToken, encryptionKey), {
     expirationTtl: 60 * 60 * 24 * 30,
   });
 
@@ -588,9 +575,7 @@ export function createOAuthMcpWorker(opts: OAuthMcpOptions): {
           const accessToken = authHeader.slice(7);
           const stored = await env.MCP_AUTH_KV.get(`access:${accessToken}`);
           if (stored) {
-            token = env.TOKEN_ENCRYPTION_KEY
-              ? await decryptToken(stored, env.TOKEN_ENCRYPTION_KEY)
-              : stored;
+            token = await decryptToken(stored, env.TOKEN_ENCRYPTION_KEY);
           }
         }
 
