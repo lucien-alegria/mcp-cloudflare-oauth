@@ -46,6 +46,7 @@ export interface OAuthMcpOptions {
 
 export interface OAuthMcpEnv {
   MCP_AUTH_KV: KVNamespace;
+  TOKEN_ENCRYPTION_KEY?: string;
   [key: string]: unknown;
 }
 
@@ -93,6 +94,54 @@ function corsHeaders(): Record<string, string> {
       "Content-Type, Authorization, MCP-Protocol-Version",
     "Access-Control-Expose-Headers": "WWW-Authenticate",
   };
+}
+
+// ---------------------------------------------------------------------------
+// Encryption helpers (AES-GCM, stored as "v1:{iv_hex}:{base64_ciphertext}")
+// ---------------------------------------------------------------------------
+
+async function importAesKey(hexKey: string): Promise<CryptoKey> {
+  const bytes = new Uint8Array(
+    hexKey.match(/.{2}/g)!.map((b) => parseInt(b, 16))
+  );
+  return crypto.subtle.importKey("raw", bytes, "AES-GCM", false, [
+    "encrypt",
+    "decrypt",
+  ]);
+}
+
+async function encryptToken(plain: string, hexKey: string): Promise<string> {
+  const key = await importAesKey(hexKey);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    new TextEncoder().encode(plain)
+  );
+  const ivHex = Array.from(iv)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  const ctB64 = btoa(String.fromCharCode(...new Uint8Array(ciphertext)));
+  return `v1:${ivHex}:${ctB64}`;
+}
+
+async function decryptToken(
+  stored: string,
+  hexKey: string
+): Promise<string> {
+  if (!stored.startsWith("v1:")) return stored; // legacy plain-text fallback
+  const parts = stored.split(":");
+  const ivHex = parts[1];
+  const ctB64 = parts.slice(2).join(":"); // re-join in case base64 contains ":"
+  const key = await importAesKey(hexKey);
+  const iv = new Uint8Array(ivHex.match(/.{2}/g)!.map((b) => parseInt(b, 16)));
+  const ciphertext = Uint8Array.from(atob(ctB64), (c) => c.charCodeAt(0));
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv },
+    key,
+    ciphertext
+  );
+  return new TextDecoder().decode(plaintext);
 }
 
 function escapeHtml(s: string): string {
@@ -271,7 +320,8 @@ function handleAuthorize(request: Request, opts: OAuthMcpOptions): Response {
 
 async function handleAuthorizePost(
   request: Request,
-  kv: KVNamespace
+  kv: KVNamespace,
+  encryptionKey?: string
 ): Promise<Response> {
   const form = await request.formData();
   const apiToken = form.get("api_token") as string;
@@ -286,16 +336,17 @@ async function handleAuthorizePost(
   }
 
   const code = randomToken(32);
+  const payload = JSON.stringify({
+    apiToken,
+    codeChallenge,
+    codeChallengeMethod,
+    clientId,
+    redirectUri,
+  });
 
   await kv.put(
     `code:${code}`,
-    JSON.stringify({
-      apiToken,
-      codeChallenge,
-      codeChallengeMethod,
-      clientId,
-      redirectUri,
-    }),
+    encryptionKey ? await encryptToken(payload, encryptionKey) : payload,
     { expirationTtl: 300 }
   );
 
@@ -308,16 +359,17 @@ async function handleAuthorizePost(
 
 async function handleToken(
   request: Request,
-  kv: KVNamespace
+  kv: KVNamespace,
+  encryptionKey?: string
 ): Promise<Response> {
   const body = await request.text();
   const params = new URLSearchParams(body);
   const grantType = params.get("grant_type");
 
   if (grantType === "authorization_code") {
-    return handleTokenAuthCode(params, kv);
+    return handleTokenAuthCode(params, kv, encryptionKey);
   } else if (grantType === "refresh_token") {
-    return handleTokenRefresh(params, kv);
+    return handleTokenRefresh(params, kv, encryptionKey);
   }
 
   return jsonResponse(
@@ -329,7 +381,8 @@ async function handleToken(
 
 async function handleTokenAuthCode(
   params: URLSearchParams,
-  kv: KVNamespace
+  kv: KVNamespace,
+  encryptionKey?: string
 ): Promise<Response> {
   const code = params.get("code");
   const codeVerifier = params.get("code_verifier");
@@ -348,7 +401,11 @@ async function handleTokenAuthCode(
     );
   }
 
-  const codeData = JSON.parse(stored) as {
+  const rawPayload = encryptionKey
+    ? await decryptToken(stored, encryptionKey)
+    : stored;
+
+  const codeData = JSON.parse(rawPayload) as {
     apiToken: string;
     codeChallenge: string;
     codeChallengeMethod: string;
@@ -382,12 +439,15 @@ async function handleTokenAuthCode(
 
   const accessToken = randomToken(32);
   const refreshToken = randomToken(32);
+  const tokenToStore = encryptionKey
+    ? await encryptToken(codeData.apiToken, encryptionKey)
+    : codeData.apiToken;
 
-  await kv.put(`access:${accessToken}`, codeData.apiToken, {
+  await kv.put(`access:${accessToken}`, tokenToStore, {
     expirationTtl: 60 * 60 * 24 * 30, // 30 days
   });
 
-  await kv.put(`refresh:${refreshToken}`, codeData.apiToken, {
+  await kv.put(`refresh:${refreshToken}`, tokenToStore, {
     expirationTtl: 60 * 60 * 24 * 365, // 1 year
   });
 
@@ -405,15 +465,16 @@ async function handleTokenAuthCode(
 
 async function handleTokenRefresh(
   params: URLSearchParams,
-  kv: KVNamespace
+  kv: KVNamespace,
+  encryptionKey?: string
 ): Promise<Response> {
   const refreshToken = params.get("refresh_token");
   if (!refreshToken) {
     return jsonResponse({ error: "invalid_request" }, 400, corsHeaders());
   }
 
-  const apiToken = await kv.get(`refresh:${refreshToken}`);
-  if (!apiToken) {
+  const storedRefresh = await kv.get(`refresh:${refreshToken}`);
+  if (!storedRefresh) {
     return jsonResponse(
       {
         error: "invalid_grant",
@@ -424,8 +485,16 @@ async function handleTokenRefresh(
     );
   }
 
+  const apiToken = encryptionKey
+    ? await decryptToken(storedRefresh, encryptionKey)
+    : storedRefresh;
+
   const accessToken = randomToken(32);
-  await kv.put(`access:${accessToken}`, apiToken, {
+  const tokenToStore = encryptionKey
+    ? await encryptToken(apiToken, encryptionKey)
+    : apiToken;
+
+  await kv.put(`access:${accessToken}`, tokenToStore, {
     expirationTtl: 60 * 60 * 24 * 30,
   });
 
@@ -505,10 +574,10 @@ export function createOAuthMcpWorker(opts: OAuthMcpOptions): {
         return handleAuthorize(request, opts);
       }
       if (pathname === "/authorize" && request.method === "POST") {
-        return handleAuthorizePost(request, env.MCP_AUTH_KV);
+        return handleAuthorizePost(request, env.MCP_AUTH_KV, env.TOKEN_ENCRYPTION_KEY);
       }
       if (pathname === "/token" && request.method === "POST") {
-        return handleToken(request, env.MCP_AUTH_KV);
+        return handleToken(request, env.MCP_AUTH_KV, env.TOKEN_ENCRYPTION_KEY);
       }
 
       // MCP endpoint (Claude web connector sends traffic to "/" instead of "/mcp")
@@ -517,8 +586,12 @@ export function createOAuthMcpWorker(opts: OAuthMcpOptions): {
         const authHeader = request.headers.get("Authorization");
         if (authHeader?.startsWith("Bearer ")) {
           const accessToken = authHeader.slice(7);
-          const resolved = await env.MCP_AUTH_KV.get(`access:${accessToken}`);
-          token = resolved ?? undefined;
+          const stored = await env.MCP_AUTH_KV.get(`access:${accessToken}`);
+          if (stored) {
+            token = env.TOKEN_ENCRYPTION_KEY
+              ? await decryptToken(stored, env.TOKEN_ENCRYPTION_KEY)
+              : stored;
+          }
         }
 
         // No valid token — tell Claude.ai to start the OAuth flow
